@@ -1,20 +1,23 @@
 import tensorflow as tf
 import numpy as np
-import pandas as pd
 import os
 import re
-from collections import Counter
+import json
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Embedding, LSTM, Dense, Dropout
 
 # Parameters
-MAX_SEQUENCE_LENGTH = 5  # Consider 5 previous words
+MAX_SEQUENCE_LENGTH = 5 
 EMBEDDING_DIM = 100
 VOCAB_SIZE = 10000
 BATCH_SIZE = 128
-EPOCHS = 5
+EPOCHS = 10
+
+os.makedirs('models', exist_ok=True)
+os.makedirs('vocabulary', exist_ok=True)
+
 
 text_data = """
 The quick brown fox jumps over the lazy dog. A journey of a thousand miles begins with a single step.
@@ -75,44 +78,58 @@ When in Rome, do as the Romans do. When the cat's away, the mice will play. Wher
 You can't judge a book by its cover. You can't teach an old dog new tricks. You reap what you sow. Youth is wasted on the young.
 """
 
-# Text preprocessing
+# Text preprocessing - MUST MATCH THE KOTLIN IMPLEMENTATION
 def preprocess_text(text):
     text = text.lower()
-    text = re.sub(r'[^\w\s]', ' ', text)  # Remove punctuation
-    text = re.sub(r'\s+', ' ', text)      # Remove multiple spaces
+    text = re.sub(r'[^\w\s]', ' ', text)  # Replace punctuation with spaces
+    text = re.sub(r'\s+', ' ', text)      # Replace multiple spaces with single space
     return text.strip()
 
 processed_text = preprocess_text(text_data)
 words = processed_text.split()
 
+print(f"Total words after preprocessing: {len(words)}")
+print(f"Sample of processed text: '{' '.join(words[:20])}...'")
+
 # Create input-output pairs for next word prediction
 input_sequences = []
 for i in range(1, len(words)):
+    # Maximum of MAX_SEQUENCE_LENGTH previous words
     start_idx = max(0, i - MAX_SEQUENCE_LENGTH)
     input_seq = words[start_idx:i]
     output_word = words[i]
     input_sequences.append((input_seq, output_word))
+
+print(f"Created {len(input_sequences)} training sequences")
+print(f"Sample sequence: {input_sequences[5]}")
 
 # Tokenize words
 tokenizer = Tokenizer(num_words=VOCAB_SIZE, oov_token="<OOV>")
 tokenizer.fit_on_texts([processed_text])
 vocab_size = min(VOCAB_SIZE, len(tokenizer.word_index) + 1)
 
+print(f"Vocabulary size: {vocab_size}")
+print(f"Sample vocab items: {list(tokenizer.word_index.items())[:10]}")
+
 # Create sequences and labels
 X = []
 y = []
-
 for input_seq, output_word in input_sequences:
     input_seq_tokens = tokenizer.texts_to_sequences([' '.join(input_seq)])[0]
     padded_input = pad_sequences([input_seq_tokens], maxlen=MAX_SEQUENCE_LENGTH, padding='pre')[0]
     output_token = tokenizer.texts_to_sequences([[output_word]])[0]
-    
+   
     if output_token:
         X.append(padded_input)
         y.append(output_token[0])
 
 X = np.array(X)
 y = np.array(y)
+
+print(f"Input shape: {X.shape}")
+print(f"Output shape: {y.shape}")
+print(f"Sample input: {X[0]}")
+print(f"Sample output: {y[0]}")
 
 # Convert labels to one-hot encoding
 y_one_hot = tf.keras.utils.to_categorical(y, num_classes=vocab_size)
@@ -131,17 +148,80 @@ model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accur
 print(model.summary())
 
 # Train model
-model.fit(X, y_one_hot, batch_size=BATCH_SIZE, epochs=EPOCHS)
+history = model.fit(X, y_one_hot, batch_size=BATCH_SIZE, epochs=EPOCHS, validation_split=0.1)
+
+# Save model info
+model_info = {
+    "input_length": MAX_SEQUENCE_LENGTH,
+    "vocab_size": vocab_size,
+    "embedding_dim": EMBEDDING_DIM
+}
+
+with open('models/model_info.json', 'w') as f:
+    json.dump(model_info, f)
+
+# Test model
+def predict_next_words(text, model, tokenizer, max_sequence_length, top_k=3):
+    # Preprocess
+    text = preprocess_text(text)
+    words = text.split()
+    
+    # Take last max_sequence_length words
+    input_words = words[-max_sequence_length:]
+    
+    # Convert to sequence
+    input_seq = tokenizer.texts_to_sequences([' '.join(input_words)])[0]
+    
+    # Pad sequence
+    padded_input = pad_sequences([input_seq], maxlen=max_sequence_length, padding='pre')
+    
+    # Predict
+    predictions = model.predict(padded_input)[0]
+    
+    # Get top k
+    top_indices = predictions.argsort()[-top_k:][::-1]
+    top_words = [list(tokenizer.word_index.keys())[list(tokenizer.word_index.values()).index(i)] 
+                 for i in top_indices if i in tokenizer.word_index.values()]
+    
+    return top_words
+
+# Test predictions
+test_text = "the quick brown fox"
+print(f"Testing prediction for '{test_text}'")
+predictions = predict_next_words(test_text, model, tokenizer, MAX_SEQUENCE_LENGTH)
+print(f"Predicted next words: {predictions}")
 
 # Save model in TensorFlow Lite format
 converter = tf.lite.TFLiteConverter.from_keras_model(model)
 converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]
 converter._experimental_lower_tensor_list_ops = False  # Fix tensor list ops issue
-
 tflite_model = converter.convert()
 
 with open('models/next_word_model.tflite', 'wb') as f:
     f.write(tflite_model)
+
+# Test TFLite model
+interpreter = tf.lite.Interpreter(model_content=tflite_model)
+interpreter.allocate_tensors()
+
+# Get input and output details
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+print(f"TFLite model input details: {input_details}")
+print(f"TFLite model output details: {output_details}")
+
+# Test inference with TFLite model
+test_input = padded_input
+interpreter.set_tensor(input_details[0]['index'], test_input)
+interpreter.invoke()
+tflite_output = interpreter.get_tensor(output_details[0]['index'])
+
+print(f"TFLite output shape: {tflite_output.shape}")
+tflite_top_indices = tflite_output[0].argsort()[-3:][::-1]
+tflite_top_words = [list(tokenizer.word_index.keys())[list(tokenizer.word_index.values()).index(i)] 
+                   for i in tflite_top_indices if i in tokenizer.word_index.values()]
+print(f"TFLite predicted next words: {tflite_top_words}")
 
 # Save vocabulary
 with open('vocabulary/vocabulary.txt', 'w') as f:
@@ -149,4 +229,4 @@ with open('vocabulary/vocabulary.txt', 'w') as f:
         if index < VOCAB_SIZE:
             f.write(f"{word}\n")
 
-print("Model and vocabulary saved successfully.")
+print("Model, vocabulary, and metadata saved successfully.")
