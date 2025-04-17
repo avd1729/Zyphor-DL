@@ -10,19 +10,26 @@ from ngram_model import NGramModel
 class KeyboardPredictor:
     """Main class for keyboard prediction functionality"""
     
-    def __init__(self, model_path=None, n=3):
+    def __init__(self, model_path=None, n=3, sample_texts=None):
         """
         Initialize the keyboard predictor
         
         Args:
             model_path: Path to load existing model from (or None to create new)
             n: N-gram size for new models
+            sample_texts: List of sample texts to pre-train the model if creating new
         """
+        # Create new model or load existing
         if model_path and os.path.exists(model_path):
             self.model = NGramModel.load(model_path)
         else:
             self.model = NGramModel(n=n)
-        
+            
+            # If sample texts provided and we're creating a new model, pre-train it
+            if sample_texts:
+                for text in sample_texts:
+                    self.model.train(text)
+                
         self.model_path = model_path or "keyboard_model.pkl"
         self.user_history = []
     
@@ -81,8 +88,10 @@ def demo():
         "Please let me know if you need anything else."
     ]
     
-    # Create a predictor
-    predictor = KeyboardPredictor(n=3)
+    predictor = KeyboardPredictor(n=3, sample_texts=sample_texts)
+
+    # Save the pre-trained model for future use
+    predictor.save_model()
     
     # Train on sample data
     for text in sample_texts:
